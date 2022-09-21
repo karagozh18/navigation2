@@ -39,7 +39,6 @@
 #include "nav2_costmap_2d/cost_values.hpp"
 
 using namespace std::chrono_literals;
-using namespace std::chrono;  // NOLINT
 using nav2_util::declare_parameter_if_not_declared;
 using rcl_interfaces::msg::ParameterType;
 using std::placeholders::_1;
@@ -55,74 +54,72 @@ NavfnPlanner::NavfnPlanner()
 NavfnPlanner::~NavfnPlanner()
 {
   RCLCPP_INFO(
-    logger_, "Destroying plugin %s of type NavfnPlanner",
+    node_->get_logger(), "Destroying plugin %s of type NavfnPlanner",
     name_.c_str());
 }
 
 void
 NavfnPlanner::configure(
-  const rclcpp_lifecycle::LifecycleNode::WeakPtr & parent,
+  rclcpp_lifecycle::LifecycleNode::SharedPtr parent,
   std::string name, std::shared_ptr<tf2_ros::Buffer> tf,
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros)
 {
+  node_ = parent;
   tf_ = tf;
   name_ = name;
   costmap_ = costmap_ros->getCostmap();
   global_frame_ = costmap_ros->getGlobalFrameID();
 
-  node_ = parent;
-  auto node = parent.lock();
-  clock_ = node->get_clock();
-  logger_ = node->get_logger();
-
   RCLCPP_INFO(
-    logger_, "Configuring plugin %s of type NavfnPlanner",
+    node_->get_logger(), "Configuring plugin %s of type NavfnPlanner",
     name_.c_str());
 
   // Initialize parameters
   // Declare this plugin's parameters
-  declare_parameter_if_not_declared(node, name + ".tolerance", rclcpp::ParameterValue(0.5));
-  node->get_parameter(name + ".tolerance", tolerance_);
-  declare_parameter_if_not_declared(node, name + ".use_astar", rclcpp::ParameterValue(false));
-  node->get_parameter(name + ".use_astar", use_astar_);
-  declare_parameter_if_not_declared(node, name + ".allow_unknown", rclcpp::ParameterValue(true));
-  node->get_parameter(name + ".allow_unknown", allow_unknown_);
-  declare_parameter_if_not_declared(
-    node, name + ".use_final_approach_orientation", rclcpp::ParameterValue(false));
-  node->get_parameter(name + ".use_final_approach_orientation", use_final_approach_orientation_);
+  declare_parameter_if_not_declared(node_, name + ".tolerance", rclcpp::ParameterValue(0.5));
+  node_->get_parameter(name + ".tolerance", tolerance_);
+  declare_parameter_if_not_declared(node_, name + ".use_astar", rclcpp::ParameterValue(false));
+  node_->get_parameter(name + ".use_astar", use_astar_);
+  declare_parameter_if_not_declared(node_, name + ".allow_unknown", rclcpp::ParameterValue(true));
+  node_->get_parameter(name + ".allow_unknown", allow_unknown_);
 
   // Create a planner based on the new costmap size
   planner_ = std::make_unique<NavFn>(
     costmap_->getSizeInCellsX(),
     costmap_->getSizeInCellsY());
+
+  // Setup callback for changes to parameters.
+  parameters_client_ = std::make_shared<rclcpp::AsyncParametersClient>(
+    node_->get_node_base_interface(),
+    node_->get_node_topics_interface(),
+    node_->get_node_graph_interface(),
+    node_->get_node_services_interface());
+
+  parameter_event_sub_ = parameters_client_->on_parameter_event(
+    std::bind(&NavfnPlanner::on_parameter_event_callback, this, _1));
 }
 
 void
 NavfnPlanner::activate()
 {
   RCLCPP_INFO(
-    logger_, "Activating plugin %s of type NavfnPlanner",
+    node_->get_logger(), "Activating plugin %s of type NavfnPlanner",
     name_.c_str());
-  // Add callback for dynamic parameters
-  auto node = node_.lock();
-  dyn_params_handler_ = node->add_on_set_parameters_callback(
-    std::bind(&NavfnPlanner::dynamicParametersCallback, this, _1));
 }
 
 void
 NavfnPlanner::deactivate()
 {
   RCLCPP_INFO(
-    logger_, "Deactivating plugin %s of type NavfnPlanner",
+    node_->get_logger(), "Deactivating plugin %s of type NavfnPlanner",
     name_.c_str());
-  dyn_params_handler_.reset();
 }
 
 void
 NavfnPlanner::cleanup()
 {
   RCLCPP_INFO(
-    logger_, "Cleaning up plugin %s of type NavfnPlanner",
+    node_->get_logger(), "Cleaning up plugin %s of type NavfnPlanner",
     name_.c_str());
   planner_.reset();
 }
@@ -144,44 +141,17 @@ nav_msgs::msg::Path NavfnPlanner::createPlan(
 
   nav_msgs::msg::Path path;
 
-  // Corner case of the start(x,y) = goal(x,y)
-  if (start.pose.position.x == goal.pose.position.x &&
-    start.pose.position.y == goal.pose.position.y)
-  {
-    unsigned int mx, my;
-    costmap_->worldToMap(start.pose.position.x, start.pose.position.y, mx, my);
-    if (costmap_->getCost(mx, my) == nav2_costmap_2d::LETHAL_OBSTACLE) {
-      RCLCPP_WARN(logger_, "Failed to create a unique pose path because of obstacles");
-      return path;
-    }
-    path.header.stamp = clock_->now();
-    path.header.frame_id = global_frame_;
-    geometry_msgs::msg::PoseStamped pose;
-    pose.header = path.header;
-    pose.pose.position.z = 0.0;
-
-    pose.pose = start.pose;
-    // if we have a different start and goal orientation, set the unique path pose to the goal
-    // orientation, unless use_final_approach_orientation=true where we need it to be the start
-    // orientation to avoid movement from the local planner
-    if (start.pose.orientation != goal.pose.orientation && !use_final_approach_orientation_) {
-      pose.pose.orientation = goal.pose.orientation;
-    }
-    path.poses.push_back(pose);
-    return path;
-  }
-
   if (!makePlan(start.pose, goal.pose, tolerance_, path)) {
     RCLCPP_WARN(
-      logger_, "%s: failed to create plan with "
+      node_->get_logger(), "%s: failed to create plan with "
       "tolerance %.2f.", name_.c_str(), tolerance_);
   }
-
 
 #ifdef BENCHMARK_TESTING
   steady_clock::time_point b = steady_clock::now();
   duration<double> time_span = duration_cast<duration<double>>(b - a);
-  std::cout << "It took " << time_span.count() * 1000 << std::endl;
+  std::cout << "It took " << time_span.count() * 1000 <<
+    " milliseconds with " << num_iterations << " iterations." << std::endl;
 #endif
 
   return path;
@@ -208,7 +178,7 @@ NavfnPlanner::makePlan(
   // clear the plan, just in case
   plan.poses.clear();
 
-  plan.header.stamp = clock_->now();
+  plan.header.stamp = node_->now();
   plan.header.frame_id = global_frame_;
 
   // TODO(orduno): add checks for start and goal reference frame -- should be in global frame
@@ -217,13 +187,13 @@ NavfnPlanner::makePlan(
   double wy = start.position.y;
 
   RCLCPP_DEBUG(
-    logger_, "Making plan from (%.2f,%.2f) to (%.2f,%.2f)",
+    node_->get_logger(), "Making plan from (%.2f,%.2f) to (%.2f,%.2f)",
     start.position.x, start.position.y, goal.position.x, goal.position.y);
 
   unsigned int mx, my;
   if (!worldToMap(wx, wy, mx, my)) {
     RCLCPP_WARN(
-      logger_,
+      node_->get_logger(),
       "Cannot create a plan: the robot's start position is off the global"
       " costmap. Planning will always fail, are you sure"
       " the robot has been properly localized?");
@@ -253,7 +223,7 @@ NavfnPlanner::makePlan(
 
   if (!worldToMap(wx, wy, mx, my)) {
     RCLCPP_WARN(
-      logger_,
+      node_->get_logger(),
       "The goal sent to the planner is off the global costmap."
       " Planning will always fail to this goal.");
     return false;
@@ -311,35 +281,9 @@ NavfnPlanner::makePlan(
     // extract the plan
     if (getPlanFromPotential(best_pose, plan)) {
       smoothApproachToGoal(best_pose, plan);
-
-      // If use_final_approach_orientation=true, interpolate the last pose orientation from the
-      // previous pose to set the orientation to the 'final approach' orientation of the robot so
-      // it does not rotate.
-      // And deal with corner case of plan of length 1
-      if (use_final_approach_orientation_) {
-        size_t plan_size = plan.poses.size();
-        if (plan_size == 1) {
-          plan.poses.back().pose.orientation = start.orientation;
-        } else if (plan_size > 1) {
-          double dx, dy, theta;
-          auto last_pose = plan.poses.back().pose.position;
-          auto approach_pose = plan.poses[plan_size - 2].pose.position;
-          // Deal with the case of NavFn producing a path with two equal last poses
-          if (std::abs(last_pose.x - approach_pose.x) < 0.0001 &&
-            std::abs(last_pose.y - approach_pose.y) < 0.0001 && plan_size > 2)
-          {
-            approach_pose = plan.poses[plan_size - 3].pose.position;
-          }
-          dx = last_pose.x - approach_pose.x;
-          dy = last_pose.y - approach_pose.y;
-          theta = atan2(dy, dx);
-          plan.poses.back().pose.orientation =
-            nav2_util::geometry_utils::orientationAroundZAxis(theta);
-        }
-      }
     } else {
       RCLCPP_ERROR(
-        logger_,
+        node_->get_logger(),
         "Failed to create a plan from potential when a legal"
         " potential was found. This shouldn't happen.");
     }
@@ -387,7 +331,7 @@ NavfnPlanner::getPlanFromPotential(
   unsigned int mx, my;
   if (!worldToMap(wx, wy, mx, my)) {
     RCLCPP_WARN(
-      logger_,
+      node_->get_logger(),
       "The goal sent to the navfn planner is off the global costmap."
       " Planning will always fail to this goal.");
     return false;
@@ -408,9 +352,7 @@ NavfnPlanner::getPlanFromPotential(
   }
 
   auto cost = planner_->getLastPathCost();
-  RCLCPP_DEBUG(
-    logger_,
-    "Path found, %d steps, %f cost\n", path_len, cost);
+  RCLCPP_DEBUG(node_->get_logger(), "Path found, %d steps, %f cost\n", path_len, cost);
 
   // extract the plan
   float * x = planner_->getPathX();
@@ -502,8 +444,7 @@ NavfnPlanner::worldToMap(double wx, double wy, unsigned int & mx, unsigned int &
   }
 
   RCLCPP_ERROR(
-    logger_,
-    "worldToMap failed: mx,my: %d,%d, size_x,size_y: %d,%d", mx, my,
+    node_->get_logger(), "worldToMap failed: mx,my: %d,%d, size_x,size_y: %d,%d", mx, my,
     costmap_->getSizeInCellsX(), costmap_->getSizeInCellsY());
 
   return false;
@@ -524,30 +465,27 @@ NavfnPlanner::clearRobotCell(unsigned int mx, unsigned int my)
   costmap_->setCost(mx, my, nav2_costmap_2d::FREE_SPACE);
 }
 
-rcl_interfaces::msg::SetParametersResult
-NavfnPlanner::dynamicParametersCallback(std::vector<rclcpp::Parameter> parameters)
+void
+NavfnPlanner::on_parameter_event_callback(
+  const rcl_interfaces::msg::ParameterEvent::SharedPtr event)
 {
-  rcl_interfaces::msg::SetParametersResult result;
-  for (auto parameter : parameters) {
-    const auto & type = parameter.get_type();
-    const auto & name = parameter.get_name();
+  for (auto & changed_parameter : event->changed_parameters) {
+    const auto & type = changed_parameter.value.type;
+    const auto & name = changed_parameter.name;
+    const auto & value = changed_parameter.value;
 
     if (type == ParameterType::PARAMETER_DOUBLE) {
       if (name == name_ + ".tolerance") {
-        tolerance_ = parameter.as_double();
+        tolerance_ = value.double_value;
       }
     } else if (type == ParameterType::PARAMETER_BOOL) {
       if (name == name_ + ".use_astar") {
-        use_astar_ = parameter.as_bool();
+        use_astar_ = value.bool_value;
       } else if (name == name_ + ".allow_unknown") {
-        allow_unknown_ = parameter.as_bool();
-      } else if (name == name_ + ".use_final_approach_orientation") {
-        use_final_approach_orientation_ = parameter.as_bool();
+        allow_unknown_ = value.bool_value;
       }
     }
   }
-  result.successful = true;
-  return result;
 }
 
 }  // namespace nav2_navfn_planner

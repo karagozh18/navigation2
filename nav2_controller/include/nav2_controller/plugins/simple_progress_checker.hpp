@@ -16,7 +16,6 @@
 #define NAV2_CONTROLLER__PLUGINS__SIMPLE_PROGRESS_CHECKER_HPP_
 
 #include <string>
-#include <vector>
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
 #include "nav2_core/progress_checker.hpp"
@@ -35,7 +34,7 @@ class SimpleProgressChecker : public nav2_core::ProgressChecker
 {
 public:
   void initialize(
-    const rclcpp_lifecycle::LifecycleNode::WeakPtr & parent,
+    const rclcpp_lifecycle::LifecycleNode::SharedPtr & node,
     const std::string & plugin_name) override;
   bool check(geometry_msgs::msg::PoseStamped & current_pose) override;
   void reset() override;
@@ -53,7 +52,7 @@ protected:
    */
   void reset_baseline_pose(const geometry_msgs::msg::Pose2D & pose);
 
-  rclcpp::Clock::SharedPtr clock_;
+  rclcpp_lifecycle::LifecycleNode::SharedPtr nh_;
 
   double radius_;
   rclcpp::Duration time_allowance_{0, 0};
@@ -62,16 +61,6 @@ protected:
   rclcpp::Time baseline_time_;
 
   bool baseline_pose_set_{false};
-  // Dynamic parameters handler
-  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr dyn_params_handler_;
-  std::string plugin_name_;
-
-  /**
-   * @brief Callback executed when a paramter change is detected
-   * @param parameters list of changed parameters
-   */
-  rcl_interfaces::msg::SetParametersResult
-  dynamicParametersCallback(std::vector<rclcpp::Parameter> parameters);
 };
 }  // namespace nav2_controller
 

@@ -61,15 +61,14 @@ void CostmapLayer::matchSize()
     master->getOriginX(), master->getOriginY());
 }
 
-void CostmapLayer::clearArea(int start_x, int start_y, int end_x, int end_y, bool invert)
+void CostmapLayer::clearArea(int start_x, int start_y, int end_x, int end_y)
 {
-  current_ = false;
   unsigned char * grid = getCharMap();
   for (int x = 0; x < static_cast<int>(getSizeInCellsX()); x++) {
     bool xrange = x > start_x && x < end_x;
 
     for (int y = 0; y < static_cast<int>(getSizeInCellsY()); y++) {
-      if ((xrange && y > start_y && y < end_y) == invert) {
+      if (xrange && y > start_y && y < end_y) {
         continue;
       }
       int index = getIndex(x, y);

@@ -1,0 +1,19 @@
+version: "2.3"
+
+services:
+  # ROS Foxy navigation
+  nav2:
+    image: 05d321bcf2da
+    tty: true
+    restart: on-failure
+    privileged: false
+    command: ros2 launch nav2_bringup navigation_launch.py
+
+  
+  # ROS Noetic + ROS 2 Foxy
+  bridge:
+    image: ros:foxy-ros1-bridge
+    restart: on-failure
+    environment:
+      - "ROS_MASTER_URI=http://my-ros-master:11311"
+    command: ros2 run ros1_bridge dynamic_bridge
